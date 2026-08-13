@@ -125,26 +125,42 @@ export function runMatchingEngine(
   newMatches: MatchRecord[];
   updatedTransactions: NormalizedTransaction[];
 } {
-  const updatedTransactions = [...transactions];
+  // Create shallow clones of transaction objects to ensure React immutability
+  const updatedTransactions = transactions.map((t) => ({ ...t }));
   const newMatches: MatchRecord[] = [];
 
   const unreconciledTransfers = updatedTransactions.filter(
-    (t) => t.status === 'UNRECONCILED' && t.direction === 'OUT' && t.transactionType === 'TRANSFER'
+    (t) =>
+      (t.status === 'UNRECONCILED' || !t.status) &&
+      t.direction === 'OUT' &&
+      t.transactionType !== 'COMMISSION'
   );
 
   const unreconciledDeposits = updatedTransactions.filter(
-    (t) => t.status === 'UNRECONCILED' && t.direction === 'IN' && t.transactionType === 'DEPOSIT'
+    (t) =>
+      (t.status === 'UNRECONCILED' || !t.status) &&
+      t.direction === 'IN' &&
+      t.transactionType !== 'COMMISSION'
   );
 
   unreconciledTransfers.forEach((trf) => {
+    // Skip if already reconciled/proposed in this run
+    if (trf.status !== 'UNRECONCILED' && trf.status) return;
+
     // Priority 1: Exact Match (same ref & same amount & same float source)
     const exactMatchIndex = unreconciledDeposits.findIndex((dep) => {
-      if (dep.status !== 'UNRECONCILED') return false;
+      if (dep.status !== 'UNRECONCILED' && dep.status) return false;
       const trfRef = (trf.external_reference || '').trim().toLowerCase();
       const depRef = (dep.external_reference || '').trim().toLowerCase();
       const refMatch = trfRef !== '' && trfRef === depRef;
       const amountMatch = Math.abs(trf.amount - dep.amount) <= amountToleranceETB;
-      const floatMatch = trf.floatSource === dep.floatSource || trf.floatSource === 'NONE';
+      const floatMatch =
+        !trf.floatSource ||
+        !dep.floatSource ||
+        trf.floatSource === 'NONE' ||
+        dep.floatSource === 'NONE' ||
+        trf.floatSource === dep.floatSource;
+
       return refMatch && amountMatch && floatMatch;
     });
 
@@ -156,7 +172,7 @@ export function runMatchingEngine(
       matchedDeposit.status = 'RECONCILED';
 
       newMatches.push({
-        id: `MATCH-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        id: `MATCH-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
         matchType: 'EXACT',
         confidenceScore: 100,
         sourceTransactionIds: [trf.id],
@@ -175,15 +191,21 @@ export function runMatchingEngine(
 
     // Priority 2: Strong Match (same amount, same shop or DSA, date within tolerance)
     const strongMatchIndex = unreconciledDeposits.findIndex((dep) => {
-      if (dep.status !== 'UNRECONCILED') return false;
+      if (dep.status !== 'UNRECONCILED' && dep.status) return false;
       const amountMatch = Math.abs(trf.amount - dep.amount) <= amountToleranceETB;
-      const shopMatch = trf.shopId === dep.shopId || trf.dsaId === dep.dsaId;
+      const shopMatch =
+        !trf.shopId || !dep.shopId || trf.shopId === dep.shopId || trf.dsaId === dep.dsaId;
       const dateDiff =
         Math.abs(
           new Date(trf.transactionDate).getTime() - new Date(dep.transactionDate).getTime()
         ) /
         (1000 * 3600 * 24);
-      const floatMatch = trf.floatSource === dep.floatSource;
+      const floatMatch =
+        !trf.floatSource ||
+        !dep.floatSource ||
+        trf.floatSource === 'NONE' ||
+        dep.floatSource === 'NONE' ||
+        trf.floatSource === dep.floatSource;
 
       return amountMatch && shopMatch && dateDiff <= dateToleranceDays && floatMatch;
     });
@@ -195,7 +217,7 @@ export function runMatchingEngine(
       matchedDeposit.status = 'PROPOSED';
 
       newMatches.push({
-        id: `MATCH-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        id: `MATCH-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
         matchType: 'STRONG',
         confidenceScore: 92,
         sourceTransactionIds: [trf.id],
@@ -206,21 +228,26 @@ export function runMatchingEngine(
         status: 'PROPOSED',
         createdAt: new Date().toISOString(),
         createdBy: `Auto Engine (Shop Match + Date Tolerance ${dateToleranceDays}d)`,
-        notes: `Proposed match between ${trf.external_reference} and ${matchedDeposit.external_reference} for shop ${trf.shopName}.`,
+        notes: `Proposed match between ${trf.external_reference} and ${matchedDeposit.external_reference} for shop ${trf.shopName || 'Central'}.`,
       });
       return;
     }
 
     // Priority 3: Fuzzy Match (Partial Reference match or amount close)
     const fuzzyMatchIndex = unreconciledDeposits.findIndex((dep) => {
-      if (dep.status !== 'UNRECONCILED') return false;
+      if (dep.status !== 'UNRECONCILED' && dep.status) return false;
       const cleanRef1 = (trf.external_reference || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
       const cleanRef2 = (dep.external_reference || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-      const partialRef = cleanRef1.length > 3 && cleanRef2.length > 3 && (cleanRef1.includes(cleanRef2) || cleanRef2.includes(cleanRef1));
+      const partialRef =
+        cleanRef1.length > 3 &&
+        cleanRef2.length > 3 &&
+        (cleanRef1.includes(cleanRef2) || cleanRef2.includes(cleanRef1));
       const amountDiff = Math.abs(trf.amount - dep.amount);
       const amountClose = amountDiff <= Math.max(50, trf.amount * 0.01); // 1% or 50 ETB
 
-      return (partialRef || amountClose) && trf.shopId === dep.shopId;
+      const shopMatch = !trf.shopId || !dep.shopId || trf.shopId === dep.shopId;
+
+      return (partialRef || amountClose) && shopMatch;
     });
 
     if (fuzzyMatchIndex !== -1) {
@@ -230,7 +257,7 @@ export function runMatchingEngine(
       matchedDeposit.status = 'PROPOSED';
 
       newMatches.push({
-        id: `MATCH-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        id: `MATCH-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
         matchType: 'FUZZY',
         confidenceScore: 75,
         sourceTransactionIds: [trf.id],

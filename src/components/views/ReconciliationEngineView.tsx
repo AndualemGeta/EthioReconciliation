@@ -23,6 +23,9 @@ import {
   AlertCircle,
   Clock,
   Layers,
+  Loader2,
+  Info,
+  DollarSign,
 } from 'lucide-react';
 
 interface ReconciliationEngineViewProps {
@@ -48,6 +51,20 @@ export const ReconciliationEngineView: React.FC<ReconciliationEngineViewProps> =
   const [dateToleranceDays, setDateToleranceDays] = useState<number>(3);
   const [amountToleranceETB, setAmountToleranceETB] = useState<number>(0);
 
+  const [isEngineRunning, setIsEngineRunning] = useState<boolean>(false);
+  const [engineNotification, setEngineNotification] = useState<{
+    type: 'success' | 'info' | 'warning';
+    title: string;
+    message: string;
+    stats?: {
+      exact: number;
+      strong: number;
+      fuzzy: number;
+      totalNew: number;
+      remainingUnmatched: number;
+    };
+  } | null>(null);
+
   // Manual matching 4-step guided flow selection state
   const [selectedTx1, setSelectedTx1] = useState<NormalizedTransaction | null>(null);
   const [selectedTx2, setSelectedTx2] = useState<NormalizedTransaction | null>(null);
@@ -55,15 +72,70 @@ export const ReconciliationEngineView: React.FC<ReconciliationEngineViewProps> =
   const canMatch = PermissionService.canPerform(userScope.role, 'CREATE_MATCH');
 
   const handleRunEngine = () => {
-    if (!canMatch) return;
-    const result = runMatchingEngine(
-      transactions,
-      dateToleranceDays,
-      amountToleranceETB
-    );
+    if (!canMatch || isEngineRunning) return;
+    setIsEngineRunning(true);
+    setEngineNotification(null);
 
-    const mergedMatches = [...result.newMatches, ...matches];
-    onMatchesUpdated(mergedMatches, result.updatedTransactions);
+    setTimeout(() => {
+      // Run matching engine on scoped transactions
+      const scopedTxs = PermissionService.filterByScope<NormalizedTransaction>(
+        transactions,
+        userScope
+      );
+
+      const result = runMatchingEngine(
+        scopedTxs,
+        dateToleranceDays,
+        amountToleranceETB
+      );
+
+      // Merge updated scoped transactions back into full transaction array
+      const updatedMap = new Map(result.updatedTransactions.map((t) => [t.id, t]));
+      const fullUpdatedTxs = transactions.map((t) => updatedMap.get(t.id) || t);
+
+      const mergedMatches = [...result.newMatches, ...matches];
+      onMatchesUpdated(mergedMatches, fullUpdatedTxs);
+
+      setIsEngineRunning(false);
+
+      // Statistics breakdown
+      const exactCount = result.newMatches.filter((m) => m.matchType === 'EXACT').length;
+      const strongCount = result.newMatches.filter((m) => m.matchType === 'STRONG').length;
+      const fuzzyCount = result.newMatches.filter((m) => m.matchType === 'FUZZY').length;
+      const totalNew = result.newMatches.length;
+
+      const remainingUnmatched = fullUpdatedTxs.filter(
+        (t) => t.status === 'UNRECONCILED'
+      ).length;
+
+      if (totalNew > 0) {
+        setEngineNotification({
+          type: 'success',
+          title: `Engine Execution Success: ${totalNew} New Match Candidate${totalNew > 1 ? 's' : ''} Created!`,
+          message: `Generated ${exactCount} Exact (Auto-Confirmed) match${exactCount === 1 ? '' : 'es'}, ${strongCount} Strong (Proposed) match${strongCount === 1 ? '' : 'es'}, and ${fuzzyCount} Fuzzy match${fuzzyCount === 1 ? '' : 'es'}.`,
+          stats: {
+            exact: exactCount,
+            strong: strongCount,
+            fuzzy: fuzzyCount,
+            totalNew,
+            remainingUnmatched,
+          },
+        });
+      } else {
+        setEngineNotification({
+          type: 'info',
+          title: 'Engine Execution Complete: No New Match Candidates Found',
+          message: `Evaluated ${scopedTxs.length} records. All eligible float transfers and bank deposits are already reconciled, or no unreconciled pairs met the current rules (Date Tolerance: ${dateToleranceDays} days, Amount Variance: ±${amountToleranceETB} ETB). You can adjust tolerances or use the Guided Manual Matching workflow below.`,
+          stats: {
+            exact: 0,
+            strong: 0,
+            fuzzy: 0,
+            totalNew: 0,
+            remainingUnmatched,
+          },
+        });
+      }
+    }, 400);
   };
 
   const proposedMatches = matches.filter((m) => m.status === 'PROPOSED');
@@ -134,22 +206,49 @@ export const ReconciliationEngineView: React.FC<ReconciliationEngineViewProps> =
               <select
                 value={dateToleranceDays}
                 onChange={(e) => setDateToleranceDays(Number(e.target.value))}
-                className="bg-slate-950 font-bold text-emerald-400 px-2 py-1 rounded focus:outline-none"
+                className="bg-slate-950 font-bold text-emerald-400 px-2 py-1 rounded focus:outline-none cursor-pointer"
               >
-                <option value={0}>0 Days (Same Day)</option>
+                <option value={0}>0 Days (Exact Date)</option>
                 <option value={1}>1 Day</option>
                 <option value={2}>2 Days</option>
                 <option value={3}>3 Days (Default)</option>
                 <option value={5}>5 Days</option>
+                <option value={7}>7 Days</option>
+              </select>
+            </div>
+
+            <div className="bg-slate-800 p-2 rounded-xl border border-slate-700 flex items-center space-x-2 text-xs">
+              <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Amount Variance:</span>
+              <select
+                value={amountToleranceETB}
+                onChange={(e) => setAmountToleranceETB(Number(e.target.value))}
+                className="bg-slate-950 font-bold text-emerald-400 px-2 py-1 rounded focus:outline-none cursor-pointer"
+              >
+                <option value={0}>±0 ETB (Exact)</option>
+                <option value={10}>±10 ETB</option>
+                <option value={50}>±50 ETB</option>
+                <option value={100}>±100 ETB</option>
+                <option value={500}>±500 ETB</option>
               </select>
             </div>
 
             <button
+              disabled={isEngineRunning}
               onClick={handleRunEngine}
-              className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-5 py-2.5 rounded-xl text-xs shadow-md transition flex items-center space-x-2"
+              className="bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-700 disabled:text-slate-400 text-slate-950 font-bold px-5 py-2.5 rounded-xl text-xs shadow-md transition flex items-center space-x-2 cursor-pointer"
             >
-              <Sparkles className="w-4 h-4" />
-              <span>Run Matching Engine</span>
+              {isEngineRunning ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin text-emerald-300" />
+                  <span>Running Engine...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-4 h-4" />
+                  <span>Run Matching Engine</span>
+                </>
+              )}
             </button>
           </div>
         ) : (
@@ -159,6 +258,59 @@ export const ReconciliationEngineView: React.FC<ReconciliationEngineViewProps> =
           </div>
         )}
       </div>
+
+      {/* ENGINE EXECUTION NOTIFICATION BANNER */}
+      {engineNotification && (
+        <div
+          className={`p-4 rounded-2xl border shadow-sm transition-all duration-300 ${
+            engineNotification.type === 'success'
+              ? 'bg-emerald-900/20 border-emerald-500/40 text-emerald-200'
+              : 'bg-slate-800/90 border-slate-700 text-slate-200'
+          }`}
+        >
+          <div className="flex items-start justify-between">
+            <div className="flex items-start space-x-3">
+              {engineNotification.type === 'success' ? (
+                <CheckCircle2 className="w-5 h-5 text-emerald-400 mt-0.5 shrink-0" />
+              ) : (
+                <Info className="w-5 h-5 text-sky-400 mt-0.5 shrink-0" />
+              )}
+              <div className="space-y-1">
+                <h4 className="font-bold text-sm text-white">
+                  {engineNotification.title}
+                </h4>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  {engineNotification.message}
+                </p>
+
+                {engineNotification.stats && (
+                  <div className="flex flex-wrap items-center gap-2 pt-2 text-[11px] font-mono">
+                    <span className="bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 px-2.5 py-0.5 rounded-full font-bold">
+                      {engineNotification.stats.exact} Exact Auto-Confirmed
+                    </span>
+                    <span className="bg-amber-500/20 border border-amber-500/30 text-amber-300 px-2.5 py-0.5 rounded-full font-bold">
+                      {engineNotification.stats.strong} Strong Proposed
+                    </span>
+                    <span className="bg-purple-500/20 border border-purple-500/30 text-purple-300 px-2.5 py-0.5 rounded-full font-bold">
+                      {engineNotification.stats.fuzzy} Fuzzy Candidates
+                    </span>
+                    <span className="bg-slate-700 text-slate-300 px-2.5 py-0.5 rounded-full font-bold">
+                      {engineNotification.stats.remainingUnmatched} Unmatched Remaining
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <button
+              onClick={() => setEngineNotification(null)}
+              className="text-slate-400 hover:text-white p-1 rounded-lg text-xs font-bold"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* MATCHING RULE HIERARCHY CARDS */}
       <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
