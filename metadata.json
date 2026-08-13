@@ -1,0 +1,6 @@
+{
+  "name": "ReconFlow Ethiopia",
+  "description": "Multi-bank and mobile-money reconciliation platform for Ethiopian distributors, retailers, and multi-branch enterprises.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
